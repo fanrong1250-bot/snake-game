@@ -2,3 +2,4 @@ node_modules/
 *.log
 .DS_Store
 auth-qr.png
+snake-qr.png
