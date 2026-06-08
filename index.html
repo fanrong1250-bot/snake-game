@@ -12,6 +12,7 @@
     --snake-head: #4ade80;
     --snake-body: #22c55e;
     --food: #f87171;
+    --wall: #64748b;
     --text: #e5e7eb;
     --muted: #94a3b8;
     --accent: #38bdf8;
@@ -44,6 +45,47 @@
   h1 { font-size: 22px; margin: 0; letter-spacing: 1px; }
   .scores { display: flex; gap: 16px; font-size: 14px; color: var(--muted); }
   .scores b { color: var(--accent); font-size: 16px; }
+  /* 工具栏：难度 + 音效开关 */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .seg {
+    display: inline-flex;
+    background: var(--panel);
+    border-radius: 999px;
+    padding: 3px;
+    gap: 2px;
+  }
+  .seg button {
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-size: 13px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background .15s ease, color .15s ease;
+  }
+  .seg button.active {
+    background: var(--accent);
+    color: #06283a;
+    font-weight: 700;
+  }
+  .sound-toggle {
+    border: none;
+    background: var(--panel);
+    color: var(--text);
+    font-size: 18px;
+    width: 40px;
+    height: 36px;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  .sound-toggle.off { color: var(--muted); opacity: .7; }
   .board-wrap {
     position: relative;
     background: var(--panel);
@@ -133,18 +175,28 @@
       </div>
     </header>
 
+    <div class="toolbar">
+      <div class="seg" id="difficulty">
+        <button data-diff="easy">简单</button>
+        <button data-diff="normal" class="active">普通</button>
+        <button data-diff="hard">困难</button>
+        <button data-diff="hell">地狱</button>
+      </div>
+      <button class="sound-toggle" id="soundBtn" title="音效开关">🔊</button>
+    </div>
+
     <div class="board-wrap">
       <canvas id="game" width="400" height="400"></canvas>
       <div class="overlay" id="overlay">
         <h2 id="ov-title">准备好了吗？</h2>
-        <p id="ov-text">吃掉 🍎 让蛇变长<br>撞墙或撞到自己就结束</p>
+        <p id="ov-text">选好难度，吃掉 🍎 让蛇变长<br>撞墙、撞到自己或 🧱 障碍物就结束</p>
         <button class="play" id="playBtn">开始游戏</button>
       </div>
     </div>
 
     <div class="hint">
       <span class="keys"><kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> 或 <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动 ·
-      <kbd>空格</kbd> 暂停 · <kbd>R</kbd> 重开</span>
+      <kbd>空格</kbd> 暂停 · <kbd>R</kbd> 重开 · <kbd>M</kbd> 静音</span>
     </div>
 
     <div class="dpad" id="dpad">
@@ -159,13 +211,21 @@
 (function () {
   'use strict';
 
-  // ===== 配置 =====
+  // ===== 棋盘配置 =====
   const COLS = 20;          // 横向格子数
   const ROWS = 20;          // 纵向格子数
   const CELL = 20;          // 每格像素（canvas 逻辑尺寸 = COLS*CELL）
-  const START_SPEED = 150;  // 初始每步间隔(ms)
-  const MIN_SPEED = 70;     // 最快速度(ms)
-  const SPEED_STEP = 4;     // 每吃一个食物加速(ms)
+
+  // ===== 难度配置 =====
+  // start: 初始每步间隔(ms)，越小越快；min: 最快速度；step: 每吃一个加速量；walls: 障碍物数量
+  const DIFFICULTY = {
+    easy:   { label: '简单', start: 180, min: 110, step: 3, walls: 0 },
+    normal: { label: '普通', start: 150, min: 80,  step: 4, walls: 6 },
+    hard:   { label: '困难', start: 120, min: 60,  step: 5, walls: 12 },
+    hell:   { label: '地狱', start: 95,  min: 50,  step: 6, walls: 20 },
+  };
+  let diffKey = localStorage.getItem('snake_diff') || 'normal';
+  if (!DIFFICULTY[diffKey]) diffKey = 'normal';
 
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
@@ -178,6 +238,8 @@
   const ovTitle = document.getElementById('ov-title');
   const ovText = document.getElementById('ov-text');
   const playBtn = document.getElementById('playBtn');
+  const diffEl = document.getElementById('difficulty');
+  const soundBtn = document.getElementById('soundBtn');
 
   const DIRS = {
     up: { x: 0, y: -1 },
@@ -186,15 +248,59 @@
     right: { x: 1, y: 0 },
   };
 
+  // ===== 音效（Web Audio API 合成，无外部文件）=====
+  let soundOn = localStorage.getItem('snake_sound') !== 'off';
+  let audioCtx = null;
+  function ensureAudio() {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) audioCtx = new AC();
+    }
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  }
+  // freq: 频率(Hz)，dur: 时长(s)，type: 波形，vol: 音量
+  function beep(freq, dur, type, vol) {
+    if (!soundOn || !audioCtx) return;
+    const t0 = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || 'square';
+    osc.frequency.setValueAtTime(freq, t0);
+    gain.gain.setValueAtTime(vol || 0.08, t0);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur);
+  }
+  const SFX = {
+    eat:  () => beep(660, 0.09, 'square', 0.09),
+    turn: () => beep(320, 0.03, 'sine', 0.04),
+    die:  () => { beep(200, 0.18, 'sawtooth', 0.12); setTimeout(() => beep(120, 0.28, 'sawtooth', 0.12), 110); },
+    start:() => { beep(440, 0.08, 'square', 0.08); setTimeout(() => beep(660, 0.10, 'square', 0.08), 90); },
+  };
+  function updateSoundUI() {
+    soundBtn.textContent = soundOn ? '🔊' : '🔇';
+    soundBtn.classList.toggle('off', !soundOn);
+  }
+  updateSoundUI();
+
   // ===== 状态 =====
-  let snake, dir, nextDir, food, score, speed;
+  let snake, dir, nextDir, food, walls, score, speed, cfg;
   let running = false, paused = false, gameOver = false;
   let loopTimer = null;
 
-  let best = Number(localStorage.getItem('snake_best') || 0);
+  let best = Number(localStorage.getItem('snake_best_' + diffKey) || 0);
   bestEl.textContent = best;
 
+  // 把某格标成"被占用"，用于放置食物/障碍物时避让
+  function occupied(x, y) {
+    if (snake && snake.some((s) => s.x === x && s.y === y)) return true;
+    if (walls && walls.some((w) => w.x === x && w.y === y)) return true;
+    return false;
+  }
+
   function reset() {
+    cfg = DIFFICULTY[diffKey];
     const cx = Math.floor(COLS / 2), cy = Math.floor(ROWS / 2);
     snake = [
       { x: cx, y: cy },
@@ -204,21 +310,41 @@
     dir = DIRS.right;
     nextDir = DIRS.right;
     score = 0;
-    speed = START_SPEED;
+    speed = cfg.start;
     gameOver = false;
     paused = false;
     scoreEl.textContent = '0';
+    best = Number(localStorage.getItem('snake_best_' + diffKey) || 0);
+    bestEl.textContent = best;
+    placeWalls();
     placeFood();
   }
 
+  // 放置障碍物：避开蛇出生行附近的中间区域，免得一开局就死
+  function placeWalls() {
+    walls = [];
+    const cy = Math.floor(ROWS / 2);
+    let tries = 0;
+    while (walls.length < cfg.walls && tries < 1000) {
+      tries++;
+      const x = Math.floor(Math.random() * COLS);
+      const y = Math.floor(Math.random() * ROWS);
+      // 留出蛇出生那一行及上下一行的安全通道
+      if (Math.abs(y - cy) <= 1) continue;
+      if (occupied(x, y)) continue;
+      walls.push({ x, y });
+    }
+  }
+
   function placeFood() {
-    let p;
+    let p, tries = 0;
     do {
       p = {
         x: Math.floor(Math.random() * COLS),
         y: Math.floor(Math.random() * ROWS),
       };
-    } while (snake.some((s) => s.x === p.x && s.y === p.y));
+      tries++;
+    } while (occupied(p.x, p.y) && tries < 1000);
     food = p;
   }
 
@@ -233,9 +359,10 @@
     const head = snake[0];
     const nh = { x: head.x + dir.x, y: head.y + dir.y };
 
-    // 撞墙 / 撞自己
+    // 撞墙(边界) / 撞自己 / 撞障碍物
     if (nh.x < 0 || nh.x >= COLS || nh.y < 0 || nh.y >= ROWS ||
-        snake.some((s) => s.x === nh.x && s.y === nh.y)) {
+        snake.some((s) => s.x === nh.x && s.y === nh.y) ||
+        walls.some((w) => w.x === nh.x && w.y === nh.y)) {
       return end();
     }
 
@@ -244,7 +371,8 @@
     if (nh.x === food.x && nh.y === food.y) {
       score += 10;
       scoreEl.textContent = score;
-      speed = Math.max(MIN_SPEED, speed - SPEED_STEP);
+      speed = Math.max(cfg.min, speed - cfg.step);
+      SFX.eat();
       placeFood();
     } else {
       snake.pop();
@@ -271,6 +399,15 @@
       ctx.beginPath();
       ctx.moveTo(0, j * CELL); ctx.lineTo(canvas.width, j * CELL); ctx.stroke();
     }
+
+    // 障碍物（深灰圆角块 + 高光）
+    walls.forEach((w) => {
+      roundRect(w.x * CELL + 1.5, w.y * CELL + 1.5, CELL - 3, CELL - 3, 4);
+      ctx.fillStyle = '#475569';
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      ctx.fillRect(w.x * CELL + 4, w.y * CELL + 4, CELL - 8, 3);
+    });
 
     // 食物（圆形）
     drawCircle(food.x, food.y, '#f87171');
@@ -310,12 +447,10 @@
     const r = 2;         // 眼睛半径
     let e1, e2;
     if (dir.x !== 0) {
-      // 水平移动：眼睛上下排列
       const ex = cx + dir.x * off;
       e1 = { x: ex, y: cy - off };
       e2 = { x: ex, y: cy + off };
     } else {
-      // 垂直移动：眼睛左右排列
       const ey = cy + dir.y * off;
       e1 = { x: cx - off, y: ey };
       e2 = { x: cx + off, y: ey };
@@ -334,13 +469,17 @@
     if (!d) return;
     // 禁止 180° 反向（相对当前实际方向判断）
     if (d.x === -dir.x && d.y === -dir.y) return;
+    // 只有真正改变方向时才发出转向音
+    if (d.x !== nextDir.x || d.y !== nextDir.y) SFX.turn();
     nextDir = d;
   }
 
   function start() {
+    ensureAudio();
     reset();
     running = true;
     overlay.classList.add('hidden');
+    SFX.start();
     draw();
     scheduleNext();
   }
@@ -349,13 +488,14 @@
     gameOver = true;
     running = false;
     clearTimeout(loopTimer);
+    SFX.die();
     if (score > best) {
       best = score;
-      localStorage.setItem('snake_best', String(best));
+      localStorage.setItem('snake_best_' + diffKey, String(best));
       bestEl.textContent = best;
     }
     ovTitle.textContent = '💀 游戏结束';
-    ovText.innerHTML = `本局得分 <b style="color:var(--accent)">${score}</b><br>最高分 ${best}`;
+    ovText.innerHTML = `难度：${cfg.label} · 本局 <b style="color:var(--accent)">${score}</b> 分<br>该难度最高分 ${best}`;
     playBtn.textContent = '再来一局';
     overlay.classList.remove('hidden');
   }
@@ -374,6 +514,37 @@
       scheduleNext();
     }
   }
+
+  // ===== 难度选择 =====
+  function setDifficulty(key) {
+    if (!DIFFICULTY[key]) return;
+    diffKey = key;
+    localStorage.setItem('snake_diff', key);
+    // 更新按钮高亮
+    Array.from(diffEl.children).forEach((b) => {
+      b.classList.toggle('active', b.getAttribute('data-diff') === key);
+    });
+    // 非进行中时，刷新预览（新障碍物布局 + 该难度最高分）
+    if (!running) {
+      reset();
+      draw();
+    }
+  }
+  diffEl.addEventListener('click', (e) => {
+    const key = e.target.getAttribute('data-diff');
+    if (key) setDifficulty(key);
+  });
+  // 初始化高亮为已保存难度
+  setDifficulty(diffKey);
+
+  // ===== 音效开关 =====
+  function toggleSound() {
+    soundOn = !soundOn;
+    localStorage.setItem('snake_sound', soundOn ? 'on' : 'off');
+    updateSoundUI();
+    if (soundOn) { ensureAudio(); SFX.turn(); }
+  }
+  soundBtn.addEventListener('click', toggleSound);
 
   // ===== 输入 =====
   document.addEventListener('keydown', (e) => {
@@ -394,6 +565,8 @@
       else togglePause();
     } else if (k === 'r') {
       start();
+    } else if (k === 'm') {
+      toggleSound();
     }
   });
 
