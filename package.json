@@ -1,0 +1,10 @@
+{
+  "name": "snake-game",
+  "version": "1.0.0",
+  "description": "一个用 Node.js 编写的终端贪吃蛇小游戏",
+  "main": "snake.js",
+  "scripts": {
+    "start": "node snake.js"
+  },
+  "license": "MIT"
+}
